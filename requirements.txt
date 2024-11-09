@@ -1,5 +1,2 @@
 Flask
 stripe
-gunicorn
-requests
-pyngrok
