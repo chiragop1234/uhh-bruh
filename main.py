@@ -1,13 +1,6 @@
 from flask import Flask, render_template_string, request, jsonify
 import stripe
-import threading
-import time
 import os
-import sys
-import urllib2
-import json
-import platform
-import subprocess
 
 app = Flask(__name__)
 
@@ -38,66 +31,6 @@ def validate_stripe_keys():
             error_message = "Error: An error occurred while validating the Stripe keys: {}".format(str(e))
 
     return error_message
-
-def start_ngrok():
-    try:
-        # Extract ngrok from the tar.gz file if not already extracted
-        tar_file = 'ngrok-v3-stable-linux-amd64.tgz'
-        ngrok_executable = 'ngrok'  # For Linux and macOS
-        if not os.path.exists(ngrok_executable):
-            if os.path.exists(tar_file):
-                print("Extracting ngrok from tar.gz file...")
-                import tarfile
-                with tarfile.open(tar_file, 'r:gz') as tar:
-                    tar.extractall()
-                os.chmod(ngrok_executable, 0o755)
-                print("ngrok extracted and made executable.")
-            else:
-                print("Error: ngrok tar.gz file not found.")
-                sys.exit(1)
-        else:
-            print("ngrok executable already exists.")
-
-        ngrok_command = './ngrok'
-
-        # Set your ngrok authtoken
-        ngrok_authtoken = "2oZhLAwMehKLxmasAfn8DbDiz5x_5KnGwrgC1YD7reiK7p6HJ"  # Replace with your actual ngrok authtoken
-
-        if not ngrok_authtoken or ngrok_authtoken == "YOUR_NGROK_AUTHTOKEN":
-            print("Error: ngrok authtoken is not set.")
-            sys.exit(1)
-
-        # Authenticate ngrok with your authtoken
-        cmd_auth = [ngrok_command, 'config', 'add-authtoken', ngrok_authtoken]
-        subprocess.check_call(cmd_auth)
-
-        # Start ngrok
-        cmd = [ngrok_command, 'http', '50050']
-        subprocess.Popen(cmd)
-        # ngrok runs in the background
-    except Exception as e:
-        print("Error starting ngrok:", e)
-        sys.exit(1)
-
-def get_tunnel_url():
-    # Use ngrok's API to get the public URL
-    url = "http://127.0.0.1:4040/api/tunnels"
-    max_retries = 15
-    tunnel_url = None
-    for i in range(max_retries):
-        try:
-            response = urllib2.urlopen(url)
-            data = json.load(response)
-            for tunnel in data['tunnels']:
-                if tunnel['proto'] == 'https':
-                    tunnel_url = tunnel['public_url']
-                    return tunnel_url
-            # If not found, wait and retry
-            time.sleep(1)
-        except Exception as e:
-            time.sleep(1)
-    print("Failed to get ngrok tunnel URL.")
-    sys.exit(1)
 
 @app.route('/', methods=['GET'])
 def index():
@@ -297,7 +230,7 @@ def process_payment():
         # Create charge
         charge = stripe.Charge.create(
             customer=customer.id,
-            amount=50,  # Amount in cents
+            amount=300,  # Amount in cents
             currency='usd',
             description='Flask Charge'
         )
@@ -335,15 +268,4 @@ def process_payment():
         return jsonify({'success': False, 'error': error_message}), 500
 
 if __name__ == '__main__':
-    # Start ngrok in a separate thread
-    ngrok_thread = threading.Thread(target=start_ngrok)
-    ngrok_thread.daemon = True
-    ngrok_thread.start()
-
-    # Wait for ngrok to start and get the tunnel URL
-    time.sleep(3)
-    tunnel_url = get_tunnel_url()
-    print("ngrok tunnel URL:", tunnel_url)
-
-    # Start the Flask app
-    app.run(host='127.0.0.1', port=50050, debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
