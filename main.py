@@ -1,5 +1,13 @@
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, jsonify
 import stripe
+import threading
+import time
+import os
+import sys
+import urllib2
+import json
+import platform
+import subprocess
 
 app = Flask(__name__)
 
@@ -13,11 +21,11 @@ def validate_stripe_keys():
     error_message = None
 
     # Check if the secret key is set
-    if not stripe.api_key or stripe.api_key == "YOUR_SECRET_KEY":
+    if not stripe.api_key or stripe.api_key == "YOUR_STRIPE_SECRET_KEY":
         error_message = "Error: Stripe secret key (sk) is not set correctly."
 
     # Check if the publishable key is set
-    elif not publishable_key or publishable_key == "YOUR_PUBLISHABLE_KEY":
+    elif not publishable_key or publishable_key == "YOUR_STRIPE_PUBLISHABLE_KEY":
         error_message = "Error: Stripe publishable key (pk) is not set correctly."
 
     else:
@@ -31,10 +39,69 @@ def validate_stripe_keys():
 
     return error_message
 
-@app.route('/', methods=['GET', 'POST'])
+def start_ngrok():
+    try:
+        # Extract ngrok from the tar.gz file if not already extracted
+        tar_file = 'ngrok-v3-stable-linux-amd64.tgz'
+        ngrok_executable = 'ngrok'  # For Linux and macOS
+        if not os.path.exists(ngrok_executable):
+            if os.path.exists(tar_file):
+                print("Extracting ngrok from tar.gz file...")
+                import tarfile
+                with tarfile.open(tar_file, 'r:gz') as tar:
+                    tar.extractall()
+                os.chmod(ngrok_executable, 0o755)
+                print("ngrok extracted and made executable.")
+            else:
+                print("Error: ngrok tar.gz file not found.")
+                sys.exit(1)
+        else:
+            print("ngrok executable already exists.")
+
+        ngrok_command = './ngrok'
+
+        # Set your ngrok authtoken
+        ngrok_authtoken = "2oZhLAwMehKLxmasAfn8DbDiz5x_5KnGwrgC1YD7reiK7p6HJ"  # Replace with your actual ngrok authtoken
+
+        if not ngrok_authtoken or ngrok_authtoken == "YOUR_NGROK_AUTHTOKEN":
+            print("Error: ngrok authtoken is not set.")
+            sys.exit(1)
+
+        # Authenticate ngrok with your authtoken
+        cmd_auth = [ngrok_command, 'config', 'add-authtoken', ngrok_authtoken]
+        subprocess.check_call(cmd_auth)
+
+        # Start ngrok
+        cmd = [ngrok_command, 'http', '50050']
+        subprocess.Popen(cmd)
+        # ngrok runs in the background
+    except Exception as e:
+        print("Error starting ngrok:", e)
+        sys.exit(1)
+
+def get_tunnel_url():
+    # Use ngrok's API to get the public URL
+    url = "http://127.0.0.1:4040/api/tunnels"
+    max_retries = 15
+    tunnel_url = None
+    for i in range(max_retries):
+        try:
+            response = urllib2.urlopen(url)
+            data = json.load(response)
+            for tunnel in data['tunnels']:
+                if tunnel['proto'] == 'https':
+                    tunnel_url = tunnel['public_url']
+                    return tunnel_url
+            # If not found, wait and retry
+            time.sleep(1)
+        except Exception as e:
+            time.sleep(1)
+    print("Failed to get ngrok tunnel URL.")
+    sys.exit(1)
+
+@app.route('/', methods=['GET'])
 def index():
     error_message = validate_stripe_keys()
-    payment_message = ''
     if error_message:
         # Render an error page if keys are invalid and log to console
         return render_template_string('''
@@ -50,45 +117,6 @@ def index():
             </html>
             ''', error_message=error_message)
     else:
-        if request.method == 'POST':
-            # Handle payment processing
-            name = request.form['name']
-            email = request.form['email']
-            token = request.form['stripeToken']
-
-            try:
-                # Create customer
-                customer = stripe.Customer.create(
-                    email=email,
-                    name=name,
-                    source=token
-                )
-
-                # Create charge
-                charge = stripe.Charge.create(
-                    customer=customer.id,
-                    amount=50,  # Amount in cents
-                    currency='usd',
-                    description='Flask Charge'
-                )
-                payment_message = 'Thank you for your payment, {}!'.format(name)
-            except stripe.error.CardError as e:
-                # Card was declined
-                err = e.json_body.get('error', {})
-                payment_message = err.get('message')
-            except stripe.error.RateLimitError:
-                payment_message = 'Rate limit error.'
-            except stripe.error.InvalidRequestError:
-                payment_message = 'Invalid parameters.'
-            except stripe.error.AuthenticationError:
-                payment_message = 'Authentication error.'
-            except stripe.error.APIConnectionError:
-                payment_message = 'Network error.'
-            except stripe.error.StripeError:
-                payment_message = 'Payment processing error. Please try again.'
-            except Exception as e:
-                payment_message = 'An error occurred: {}'.format(str(e))
-
         return render_template_string('''
         <!DOCTYPE html>
         <html>
@@ -141,6 +169,31 @@ def index():
             </style>
             <!-- Load Stripe.js -->
             <script src="https://js.stripe.com/v3/"></script>
+        </head>
+        <body>
+            <h1>Stripe Payment Form</h1>
+            <form id="payment-form">
+                <div>
+                    <label for="name">Name</label>
+                    <input type="text" name="name" id="name" required/>
+                </div>
+                <div>
+                    <label for="email">Email</label>
+                    <input type="email" name="email" id="email" required/>
+                </div>
+                <div>
+                    <label for="card-element">Credit or Debit Card</label>
+                    <div id="card-element" class="StripeElement">
+                    <!-- Stripe Element will be inserted here -->
+                    </div>
+                </div>
+                <!-- Display form errors -->
+                <div id="card-errors" role="alert"></div>
+                <button type="submit">Submit Payment</button>
+            </form>
+            <!-- Payment message -->
+            <div id="payment-message"></div>
+
             <script>
             // Initialize Stripe with the publishable key
             var stripe = Stripe('{{ publishable_key }}');
@@ -185,51 +238,112 @@ def index():
                         errorElement.textContent = result.error.message;
                         console.error("Stripe createToken error:", result.error.message);
                     } else {
-                        // Insert the token ID into the form and submit
-                        var form = document.getElementById('payment-form');
-                        var hiddenInput = document.createElement('input');
-                        hiddenInput.setAttribute('type', 'hidden');
-                        hiddenInput.setAttribute('name', 'stripeToken');
-                        hiddenInput.setAttribute('value', result.token.id);
-                        form.appendChild(hiddenInput);
+                        // Send the token and other form data to the server via AJAX
+                        var formData = new FormData();
+                        formData.append('stripeToken', result.token.id);
+                        formData.append('name', document.getElementById('name').value);
+                        formData.append('email', document.getElementById('email').value);
 
-                        form.submit();
+                        fetch('/', {
+                            method: 'POST',
+                            body: formData
+                        })
+                        .then(function(response) {
+                            return response.json();
+                        })
+                        .then(function(data) {
+                            var paymentMessage = document.getElementById('payment-message');
+                            if (data.success) {
+                                paymentMessage.textContent = data.message;
+                                paymentMessage.style.color = 'green';
+                                console.log("Payment successful:", data.message);
+                            } else {
+                                paymentMessage.textContent = data.error;
+                                paymentMessage.style.color = 'red';
+                                console.error("Payment error:", data.error);
+                            }
+                        })
+                        .catch(function(error) {
+                            console.error("Fetch error:", error);
+                        });
                     }
                 });
             }
+
+            document.getElementById('payment-form').addEventListener('submit', handleForm);
             </script>
-        </head>
-        <body>
-            <h1>Stripe Payment Form</h1>
-            <form id="payment-form" method="POST" onsubmit="handleForm(event);">
-                <div>
-                    <label for="name">Name</label>
-                    <input type="text" name="name" id="name" required/>
-                </div>
-                <div>
-                    <label for="email">Email</label>
-                    <input type="email" name="email" id="email" required/>
-                </div>
-                <div>
-                    <label for="card-element">Credit or Debit Card</label>
-                    <div id="card-element" class="StripeElement">
-                    <!-- Stripe Element will be inserted here -->
-                    </div>
-                </div>
-                <!-- Display form errors -->
-                <div id="card-errors" role="alert"></div>
-                <button type="submit">Submit Payment</button>
-            </form>
-            <!-- Payment message -->
-            {% if payment_message %}
-                <div id="payment-message">{{ payment_message }}</div>
-                <script>
-                    console.log("Payment Message: {{ payment_message }}");
-                </script>
-            {% endif %}
         </body>
         </html>
-        ''', publishable_key=publishable_key, payment_message=payment_message)
+        ''', publishable_key=publishable_key)
+
+@app.route('/', methods=['POST'])
+def process_payment():
+    error_message = validate_stripe_keys()
+    if error_message:
+        return jsonify({'success': False, 'error': error_message}), 400
+
+    name = request.form.get('name')
+    email = request.form.get('email')
+    token = request.form.get('stripeToken')
+
+    try:
+        # Create customer
+        customer = stripe.Customer.create(
+            email=email,
+            name=name,
+            source=token
+        )
+
+        # Create charge
+        charge = stripe.Charge.create(
+            customer=customer.id,
+            amount=50,  # Amount in cents
+            currency='usd',
+            description='Flask Charge'
+        )
+        success_message = 'Thank you for your payment, {}!'.format(name)
+        return jsonify({'success': True, 'message': success_message}), 200
+
+    except stripe.error.CardError as e:
+        # Card was declined
+        err = e.json_body.get('error', {})
+        error_message = err.get('message')
+        return jsonify({'success': False, 'error': error_message}), 400
+
+    except stripe.error.RateLimitError:
+        error_message = 'Rate limit error.'
+        return jsonify({'success': False, 'error': error_message}), 429
+
+    except stripe.error.InvalidRequestError:
+        error_message = 'Invalid parameters.'
+        return jsonify({'success': False, 'error': error_message}), 400
+
+    except stripe.error.AuthenticationError:
+        error_message = 'Authentication error.'
+        return jsonify({'success': False, 'error': error_message}), 401
+
+    except stripe.error.APIConnectionError:
+        error_message = 'Network error.'
+        return jsonify({'success': False, 'error': error_message}), 503
+
+    except stripe.error.StripeError:
+        error_message = 'Payment processing error. Please try again.'
+        return jsonify({'success': False, 'error': error_message}), 500
+
+    except Exception as e:
+        error_message = 'An error occurred: {}'.format(str(e))
+        return jsonify({'success': False, 'error': error_message}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=50302, debug=True)
+    # Start ngrok in a separate thread
+    ngrok_thread = threading.Thread(target=start_ngrok)
+    ngrok_thread.daemon = True
+    ngrok_thread.start()
+
+    # Wait for ngrok to start and get the tunnel URL
+    time.sleep(3)
+    tunnel_url = get_tunnel_url()
+    print("ngrok tunnel URL:", tunnel_url)
+
+    # Start the Flask app
+    app.run(host='127.0.0.1', port=50050, debug=True)
